@@ -25,7 +25,10 @@ def load_text_encoder(
     text_encoder_path,
     torch_dtype,
     torch_device,
+    defer_load=False,
 ):
+    if defer_load:
+        return None
     text_encoder = UMT5EncoderModel.from_pretrained(
         text_encoder_path,
         torch_dtype=torch_dtype,
@@ -42,6 +45,7 @@ def load_transformer(
     transformer_path,
     torch_dtype,
     torch_device,
+    gpu_working_set_gib=0,
     **kwargs
 ):
     model = WanTransformer3DModel.from_pretrained(
@@ -49,6 +53,12 @@ def load_transformer(
         torch_dtype=torch_dtype,
         **kwargs
     )
+    # Diffusers clears the CUDA cache after CPU checkpoint loading. Reserve
+    # the reusable inference pool here, after that clear and before GPU copies.
+    if gpu_working_set_gib:
+        working_set = torch.empty(int(gpu_working_set_gib * 1024**3),
+                                  device=torch_device, dtype=torch.uint8)
+        del working_set
     return model.to(torch_device)
 
 

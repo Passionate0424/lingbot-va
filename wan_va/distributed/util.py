@@ -13,7 +13,7 @@ def _configure_model(model, shard_fn, param_dtype, device, eval_mode=True):
         dist.barrier()
 
     if dist.is_initialized():
-        model = shard_fn(model)
+        model = shard_fn(model, param_dtype=param_dtype)
     else:
         model.to(param_dtype)
         model.to(device)

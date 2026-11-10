@@ -61,7 +61,7 @@ class VA_Server:
         self.vae = load_vae(
             os.path.join(job_config.wan22_pretrained_model_name_or_path,
                          'vae'),
-            torch_dtype=self.dtype,
+            torch_dtype=torch.float32 if self.enable_offload else self.dtype,
             torch_device='cpu' if self.enable_offload else self.device,
         )
         self.streaming_vae = WanVAEStreamingWrapper(self.vae)
@@ -73,18 +73,20 @@ class VA_Server:
         self.text_encoder = load_text_encoder(
             os.path.join(job_config.wan22_pretrained_model_name_or_path,
                          'text_encoder'),
-            torch_dtype=self.dtype,
+            defer_load=getattr(job_config, 'defer_text_encoder', False),
+            torch_dtype=torch.float32 if self.enable_offload else self.dtype,
             torch_device='cpu' if self.enable_offload else self.device,
         )
 
         self.transformer = load_transformer(
             os.path.join(job_config.wan22_pretrained_model_name_or_path,
                          'transformer'),
+            gpu_working_set_gib=getattr(job_config, 'gpu_working_set_gib', 0),
             torch_dtype=self.dtype,
             torch_device=self.device,
             attn_mode="torch"
         )
-        shard_fn = shard_model
+        shard_fn = partial(shard_model, granularity=getattr(job_config, 'fsdp_granularity', 'fine'))
         self.transformer = _configure_model(model=self.transformer,
                                             shard_fn=shard_fn,
                                             param_dtype=self.dtype,
@@ -98,7 +100,7 @@ class VA_Server:
             vae_half = load_vae(
                 os.path.join(job_config.wan22_pretrained_model_name_or_path,
                              'vae'),
-                torch_dtype=self.dtype,
+                torch_dtype=torch.float32 if self.enable_offload else self.dtype,
                 torch_device='cpu' if self.enable_offload else self.device,
             )
             self.streaming_vae_half = WanVAEStreamingWrapper(vae_half)
@@ -351,11 +353,11 @@ class VA_Server:
             videos_high = videos[0] / 255.0 * 2.0 - 1.0
             videos_left_and_right = torch.cat(videos[1:],
                                               dim=0) / 255.0 * 2.0 - 1.0
-            vae_device = next(self.streaming_vae.vae.parameters()).device
+            vae_device = next(self.streaming_vae.encoder.parameters()).device
             enc_out_high = self.streaming_vae.encode_chunk(
-                videos_high.to(vae_device).to(self.dtype))
+                videos_high.to(device=vae_device, dtype=self.vae.dtype))
             enc_out_left_and_right = self.streaming_vae_half.encode_chunk(
-                videos_left_and_right.to(vae_device).to(self.dtype))
+                videos_left_and_right.to(device=vae_device, dtype=self.vae.dtype))
             enc_out = torch.cat([
                 torch.cat(enc_out_left_and_right.split(1, dim=0), dim=-1),
                 enc_out_high
@@ -363,8 +365,8 @@ class VA_Server:
                                 dim=-2)
         else:
             videos = torch.cat(videos, dim=0) / 255.0 * 2.0 - 1.0
-            vae_device = next(self.streaming_vae.vae.parameters()).device
-            videos_chunk = videos.to(vae_device).to(self.dtype)
+            vae_device = next(self.streaming_vae.encoder.parameters()).device
+            videos_chunk = videos.to(device=vae_device, dtype=self.vae.dtype)
             enc_out = self.streaming_vae.encode_chunk(videos_chunk)
 
         mu, logvar = torch.chunk(enc_out, 2, dim=1)
@@ -372,7 +374,7 @@ class VA_Server:
         latents_std = torch.tensor(self.vae.config.latents_std).to(mu.device)
         mu_norm = self.normalize_latents(mu, latents_mean, 1.0 / latents_std)
         video_latent = torch.cat(mu_norm.split(1, dim=0), dim=-1)
-        return video_latent.to(self.device)
+        return video_latent.to(device=self.device, dtype=self.dtype)
 
     def _reset(self, prompt=None):
         logger.info('Reset.')
